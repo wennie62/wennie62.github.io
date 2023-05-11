@@ -1,0 +1,1062 @@
+/*
+  SiteMiraiZの外部サイトへ計測タグを貼る
+  <script src="//www.example.com/cms/js/smz_ma.js" charset="UTF-8" defer></script>
+  <script>__smz_ma={'hostname':'www.example.com','top_url':'/'};</script>
+	hostname : SiteMiraiZサイトのホスト名(必須)
+	top_url  : SiteMiraiZサイトのトップページの相対URL(必須)
+	is_internal : 内部サイトか(デフォルト：false)
+	bgcolor  : 転送待ちの背景色(デフォルト：#fff)
+ */
+(function() {
+	"use strict";
+	// 必須設定
+	const TRANSFER_PARAMETER = '___smz_tr';
+	const COOKIE_KEY = '__smz_ma';
+	const SESSION_COOKIE_KEY = '__smz_session';
+	const COOKIE_VALUE_LENGTH = 32;
+	const EXTERNAL_KEY = '__smz_external';
+	const OVERLAY_ID = '___smz_overlay';
+	const OVERLAY_BACKGROUND_COLOR = (__smz_ma.bgcolor ? __smz_ma.bgcolor : '#000'); 
+	const HAS_SESSION = hasCookieItem(SESSION_COOKIE_KEY);
+	const CONTENT_ID = '__smz_content';
+	const CONTENT_CLOSE_ID = '__smz_content_close';
+	const CONTENT_BACK_DARK_ID = '__smz_fade_layer';
+	const SCRIPT_START_DATETIME = new Date();
+	
+	// 状態取得
+	let isPreview = false;
+
+	// bodyのcssのoverflow保存用
+	let bodyOriginalOverflow = "";
+	
+	// クローズ状態取得（ブラウザバックで２回表示される対策）
+	let isClose = false;
+	
+	// メインメソッド
+	main();
+	
+	// メインメソッド(本体)
+	function main() {
+		
+		// 起動前チェック
+		if (!validateOptions()) return;
+		
+		// イベント登録
+        if (document.readyState == 'loading' || document.readyState == 'interactive') {
+            document.addEventListener('DOMContentLoaded', initializePageTransition);
+            document.addEventListener('DOMContentLoaded', initializeExternalForm);
+        } else {
+            initializePageTransition();
+            initializeExternalForm();
+        }
+
+		// 転送読み込み表示
+		showOverlay();
+
+		// プレビュー用パラメータ取得
+		const hashParameters = getHashParameters();
+		isPreview = (hashParameters && hashParameters.attend_hash);
+		
+		// クッキー取得/生成
+		const cookieValue = getCookieKey(hashParameters);
+		
+		// 転送設定があれば転送
+		if (transfer(cookieValue)) return;
+		
+		// 外部ならばMAリクエスト送信
+		if (isExternal()) {
+			// アクセス送信
+			loadAccessImage(cookieValue);
+			// リンクにクッキーパラメータ付与
+			attachCookieParameter(cookieValue);
+		}
+		
+		// 接客コンテンツを取得
+		loadAttendContent(cookieValue, hashParameters);
+		if (isPreview) {
+			// プレビュー表示
+			showAttendPreviewToast(cookieValue);
+		}
+		
+	}
+	
+	function validateOptions() {
+		if (typeof __smz_ma === 'undefined' || !__smz_ma) {
+			console.warn('SiteMiraiZ計測タグ(__smz_ma)を定義してください。')
+			return false;
+		}
+		if (!__smz_ma.hostname) {
+			console.warn('SiteMiraiZ計測タグにホスト名(hostname)を定義してください。')
+			return false;
+		}
+		if (!__smz_ma.top_url) {
+			console.warn('SiteMiraiZ計測タグにトップページの相対URL(top_url)を定義してください。')
+			return false;
+		}
+		return true;
+	}
+	
+	function isExternal() {
+		if (__smz_ma.is_internal) return false;
+		if (document.location.hostname === __smz_ma.hostname) return false;
+		if (document.location.hostname.indexOf(__smz_ma.top_url) === 0) return false;
+		return true;
+	}
+	
+	// ハッシュからクエリパラメータを取得(プレビュー用)
+	function getHashParameters() {
+		const hashParameters = new Object;
+		if (!document.location.hash) {
+			return hashParameters;
+		}
+		const pairs = location.hash.substring(1).split('&');
+		for(let i = 0; i < pairs.length; i++) {
+			const keyValue = pairs[i].split('=');
+			if (keyValue.length < 2) {
+				hashParameters[keyValue[0]] = true;
+			} else {
+				hashParameters[keyValue[0]] = keyValue[1];
+			}
+		}
+		return hashParameters;
+	}
+	
+	// クッキー生成・更新
+	function getCookieKey(hashParameters) {
+		
+		// 有効期限
+		const expired = new Date();
+		expired.setYear(expired.getFullYear() + 2);
+		
+		let cookieValue;
+		if (hashParameters && hashParameters[COOKIE_KEY]) {
+			// プレビューCookie
+			cookieValue = hashParameters[COOKIE_KEY];
+			return cookieValue;
+		}
+		if (!cookieValue) {
+			// Cookieから値を取得
+			cookieValue = getCookieItem(COOKIE_KEY);
+		}
+		if (!cookieValue) {
+			// 値を生成
+			cookieValue = '';
+			while (cookieValue.length < COOKIE_VALUE_LENGTH) {
+				cookieValue += Math.random().toString(36).substring(2);
+			}
+			cookieValue = cookieValue.substring(0, COOKIE_VALUE_LENGTH);
+		}
+		// Cookieに値を保存
+		setCookieItem(COOKIE_KEY, cookieValue, expired, '/', document.location.hostname, false);
+		
+		if (!HAS_SESSION) {
+			setCookieItem(SESSION_COOKIE_KEY, 1, null, '/', document.location.hostname, false);
+		}
+		
+		return cookieValue;
+	}
+	
+	// アクセス送信
+	function loadAccessImage(cookieValue) {
+		let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'ma.png';
+		link += '?' + COOKIE_KEY + '=' + cookieValue;
+		if (isExternal()) link += "&" + EXTERNAL_KEY + "=1";
+		if (!HAS_SESSION) link += "&" + SESSION_COOKIE_KEY + "=1";
+		link += '&url=' + encodeURIComponent( document.location.href );
+		link += '&referer=' + encodeURIComponent( document.referrer );
+		link += '&title=' + encodeURIComponent( document.title );
+		const image = new Image();
+		image.onerror = hideOverlay;
+		image.src = link;
+	}
+	
+	function loadAttendContent(cookieValue, hashParameters) {
+		let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'attend.json';
+		link += '?' + COOKIE_KEY + '=' + cookieValue;
+		if (isExternal()) link += "&" + EXTERNAL_KEY + "=1";
+		link += '&url=' + encodeURIComponent(
+			document.location.protocol + '//' + document.location.hostname
+			 + document.location.pathname + document.location.search
+		);
+		if (hashParameters && hashParameters.attend_hash) {
+			link += '&attend_hash=' + hashParameters.attend_hash;
+		}
+		link += '&__t=' + (new Date()).getTime().toString();
+		
+		const request = new XMLHttpRequest();
+		request.addEventListener('load', showAttendContent);
+		request.open('GET', link);
+		request.responseType = 'json';
+		request.send();
+	}
+	
+	// テンプレート設定
+	function showAttendContent() {
+		if (!this.response) return;
+
+		let json;
+		if (typeof(this.response) == 'object') {
+			json = this.response;
+		} else {
+			json = JSON.parse(this.response);
+		}
+		if (json.length == 0) return;
+		
+		const content = json[0];
+		if (!content) return;
+		if (!content.content_type) return;
+		switch(content.content_type) {
+			case 'insert' :
+				showAttendContentInsert(content);
+				break;
+			case 'popup' :
+				showAttendContentPopup(content);
+				break;
+		}
+	}
+	
+	function showAttendContentInsert(content) {
+		if (!content.target_selector) {
+			content.target_selector = 'body';
+			content.position = 'child-last';
+		}
+		const target = document.querySelector(content.target_selector);
+		if (!target) return;
+		
+		const node = document.createElement('div');
+		node.id = CONTENT_ID;
+		node.innerHTML += content.html;
+		if (!isPreview) {
+			node.addEventListener('click', clickNode);
+			function clickNode() {
+				sendAttendReact(getCookieItem(COOKIE_KEY), content.attend_hash, 'click');
+				node.removeEventListener('click', clickNode);
+			}
+		}
+		node.insertBefore(getCloseButton(content), node.firstChild);
+		
+		switch(content.position) {
+			case 'before' : // 基準要素の前
+				target.parentElement.insertBefore(node, target);
+				break;
+			case 'after' : // 基準要素の後
+				if (target.nextElementSibling) {
+					target.parentElement.insertBefore(node, target.nextElementSibling);
+				} else {
+					target.parentElement.appendChild(node);
+				}
+				break;
+			case 'child-first' : // 基準要素の子(最初)
+				target.insertBefore(node, target.firstChild);
+				break;
+			case 'child-last' : // 基準要素の子(最後)
+				target.appendChild(node);
+				break;
+		}
+		
+		let contentWidth;
+		if (content.width) {
+			if (content.width.match(/^\d+(px|%)$/)) {
+				contentWidth = content.width;
+			} else if (content.width.match(/^\d+$/)) {
+				contentWidth = content.width + 'px';
+			}
+		}
+		
+		// 表示位置
+		const styles = [];
+		styles.push('position: relative;');
+		if (contentWidth) {
+			styles.push('width: ' + contentWidth + ' !important;');
+		}
+		const styleText = '#' + CONTENT_ID + ' {' + styles.join('') + '}';
+		const styleElement = document.createElement('style');
+		styleElement.appendChild(
+			document.createTextNode(styleText)
+		);
+		document.head.appendChild(styleElement);
+		
+		if (!isPreview) {
+			sendAttendReact(getCookieItem(COOKIE_KEY), content.attend_hash, 'view');
+		}
+	}
+	
+	function showAttendContentPopup(content) {
+
+		if (bodyOriginalOverflow==""){
+			bodyOriginalOverflow = document.body.style.getPropertyValue('overflow');
+		}
+
+		const node = document.createElement('div');
+		node.id = CONTENT_ID;
+		node.innerHTML = content.html;
+		node.style.setProperty('display', 'none');
+		if (!isPreview) {
+			node.addEventListener('click', clickNode);
+			function clickNode() {
+				sendAttendReact(getCookieItem(COOKIE_KEY), content.attend_hash, 'click');
+				node.removeEventListener('click', clickNode);
+			}
+		}
+		document.body.appendChild(node);
+		
+		// 待機時間
+		if (content.start || content.start === 0) {
+			setShowScroll();
+		} else {
+			setTimeout(showNode, getWaitMilliseconds(SCRIPT_START_DATETIME));
+		}
+		
+		function setShowScroll() {
+			if (!content.target_selector) {
+				content.target_selector = 'body';
+			}
+			const target = document.querySelector(content.target_selector);
+			if (!target) return;
+			
+			if (content.start.indexOf('%') > 0) {
+				content.startPercentage = parseFloat(content.start.substring(0, content.start.indexOf('%')));
+			} else if (content.start.indexOf('px') > 0) {
+				content.startPixel = parseInt(content.start.substring(0, content.start.indexOf('px')));
+			} else if (content.start.match(/^\d+$/)) {
+				content.startPixel = content.start;
+			}
+			
+			// スクロールイベント処理
+			let targetOffsetHeight;
+			let targetRectY;
+			if (content.target_selector == 'body') {
+				targetOffsetHeight = getPageHeight();
+				targetRectY = 0;
+			} else {
+				const targetRect = target.getBoundingClientRect();
+				targetRectY = window.pageYOffset + (!targetRect.y ? targetRect.top : targetRect.y); // IE11対応
+				targetOffsetHeight = target.offsetHeight;
+			}
+			pageScroll();
+			document.addEventListener('scroll', pageScroll);
+			function pageScroll() {
+				const scrollPositionY = window.pageYOffset + window.innerHeight;
+				if (content.startPercentage || content.startPercentage === 0) {
+					const viewPercentage = parseInt((scrollPositionY - targetRectY) / targetOffsetHeight * 100);
+					if (viewPercentage < content.startPercentage) return;
+				}
+				if (content.startPixel || content.startPixel === 0) {
+					const viewPixel = (scrollPositionY - targetRectY);
+					if (viewPixel < content.startPixel) return;
+				}
+				document.removeEventListener('scroll', pageScroll);
+				setTimeout(showNode, getWaitMilliseconds(new Date()));
+			}
+            
+		}
+		
+		function showNode() {
+			
+			// 一度閉じている場合は再表示しない（ブラウザバック・更新対策）
+			if (isClose) return;
+
+			// 表示エフェクト
+			switch(content.show_effect) {
+				case 'immediate':
+					break;
+				case 'fade-in':
+					showEffectFadeIn();
+					break;
+				case 'back-dark':
+					showEffectBackDark();
+					break;
+			}
+			
+			// 閉じるボタン追加
+			node.insertBefore(getCloseButton(content), node.firstChild);
+
+			// 表示位置
+			const styles = [];
+			styles.push('display: block;');
+			styles.push('position: fixed;');
+			if (content.width) {
+				styles.push('width: ' + content.width + ' !important;');
+			}
+			let paddingPx;
+			if (content.width.indexOf('%') == content.width.length - 1) {
+				paddingPx = '0px';
+			} else {
+				paddingPx = '20px';
+			}
+			styles.push('bottom: ' + paddingPx + ';');
+			switch(content.position) {
+				case 'center-bottom' : // 中央下
+					styles.push('left: 50%;');
+					styles.push('transform: translateX(-50%);');
+					break;
+				case 'right-bottom' : // 右下
+					styles.push('right: ' + paddingPx + ';');
+					break;
+				case 'left-bottom' : // 左下
+					styles.push('left: ' + paddingPx + ';');
+					break;
+			}
+			const styleText = '#' + CONTENT_ID + ' {' + styles.join('') + '}';
+			const styleElement = document.createElement('style');
+			styleElement.appendChild(
+				document.createTextNode(styleText)
+			);
+			document.head.appendChild(styleElement);
+
+			// 暗くする背景を表示する
+			let backDiv = document.querySelector("#" + CONTENT_BACK_DARK_ID);
+			if (backDiv) {
+				document.body.style.setProperty('overflow', 'hidden');
+				backDiv.style.setProperty('display', 'block');
+			}
+
+			// コンテンツを表示する
+			node.style.setProperty('display', 'block');
+			if (!isPreview) {
+				sendAttendReact(getCookieItem(COOKIE_KEY), content.attend_hash, 'view');
+			}
+				
+			// 表示継続時間
+			const showMilliseconds = (content.show_second ? content.show_second * 1000 : 0);
+			if (showMilliseconds) {
+				setTimeout(hideNode, showMilliseconds);
+			}
+		}
+		
+		function showEffectFadeIn() {
+			// 読み込みアニメーション
+			const keyframes = '@keyframes fade-in {' + [
+				'0% { opacity : 0 }',
+				'100% { opacity : 2 }'
+			].join('') + '}';
+			const keyframeStyle = document.createElement('style');
+			keyframeStyle.appendChild(
+				document.createTextNode(keyframes)
+			);
+			document.head.appendChild(keyframeStyle);
+			node.style.setProperty('animation', 'fade-in 2s');
+		}
+		
+		function showEffectBackDark() {
+
+			let backDiv = document.querySelector("#" + CONTENT_BACK_DARK_ID);
+			if (!backDiv) {
+				const fadeStyleText = "#" + CONTENT_BACK_DARK_ID + " { position:absolute;  top:0px;  left:0px;  width:100%;  height:" + getPageHeight() + "px;  background-color:#000000;  opacity:0.5;  z-index:100000; }";
+				const fadeStyle = document.createElement('style');
+				fadeStyle.appendChild(
+					document.createTextNode(fadeStyleText)
+				);
+
+				const fadeDiv = document.createElement('div');
+				fadeDiv.setAttribute("id", CONTENT_BACK_DARK_ID);
+
+				document.body.appendChild(fadeStyle);
+				document.body.appendChild(fadeDiv);
+
+				//backDiv = fadeDiv;
+			}
+
+			//backDiv.style.setProperty('display', 'block');
+			node.style.setProperty('z-index', '100001');
+		}
+		
+		function hideNode() {
+
+			document.body.style.setProperty('overflow', bodyOriginalOverflow);
+			const target = document.querySelector("#" + CONTENT_BACK_DARK_ID);
+			if (target) {
+				target.style.setProperty('display', 'none');
+			}
+
+			node.style.setProperty('display', 'none');
+		}
+		
+		function getWaitMilliseconds(startDateTime) {
+			// 待機時間の設定があるか
+			const waitMilliseconds = (content.wait_second ? content.wait_second * 1000 : 0);
+			if (!waitMilliseconds) return 0;
+			
+			// 待機時間・経過時間を比較
+			const currentDateTime = new Date();
+			const elapsedMiliseconds = currentDateTime - startDateTime;
+			if (waitMilliseconds < elapsedMiliseconds) return 0;
+			return (waitMilliseconds - elapsedMiliseconds);
+		}
+
+		function getPageHeight() {
+			return Math.max(
+				document.body.scrollHeight, document.documentElement.scrollHeight,
+				document.body.offsetHeight, document.documentElement.offsetHeight,
+				document.body.clientHeight, document.documentElement.clientHeight
+			);
+		}
+
+	}
+	
+	function getCloseButton(content) {
+		// CSS
+		const styles = [
+			'float: right;',
+			'position: absolute;',
+			'right: 0px;',
+			'top: 0px;',
+			'width: 30px;',
+			'height: 30px;',
+			'line-height: 30px;',
+			'background-color: black;',
+			'color: white;',
+			'font-size: 20px;',
+			'font-weight: bold;',
+			'text-align: center;',
+			'cursor: pointer;'
+		];
+		const styleText = '#' + CONTENT_CLOSE_ID + ' {' + styles.join('') + '}';
+		const styleElement = document.createElement('style');
+		styleElement.appendChild(
+			document.createTextNode(styleText)
+		);
+		document.head.appendChild(styleElement);
+		
+		// ボタン
+		const button = document.createElement('span');
+		button.id = CONTENT_CLOSE_ID;
+		button.textContent = '×';
+		button.addEventListener('click', function(e) {
+			clickCloseHandler(e);
+			return;
+		});
+
+		const backDarkContent = document.querySelector("#" + CONTENT_BACK_DARK_ID);
+		if (backDarkContent) {
+			backDarkContent.addEventListener('click', function(e) {
+				clickCloseHandler(e);
+				return;
+			});
+		}
+
+
+		function clickCloseHandler(e) {
+			e.preventDefault();
+			e.stopPropagation();
+
+			isClose = true;
+
+			if (!isPreview) {
+				sendAttendReact(getCookieItem(COOKIE_KEY), content.attend_hash, 'close');
+			}
+			const attendContent = document.getElementById(CONTENT_ID);
+			if (!attendContent) return;
+			attendContent.style.setProperty('display', 'none');
+
+			document.body.style.setProperty('overflow', bodyOriginalOverflow);
+			const target = document.querySelector("#" + CONTENT_BACK_DARK_ID);
+			if (target) {
+				target.style.setProperty('display', 'none');
+			}
+
+			return;
+		}
+
+		return button;
+	}		
+	
+	function sendAttendReact(cookieValue, attendHash, action) {
+		
+		const url = '//' + __smz_ma.hostname + __smz_ma.top_url + 'attend_react';
+		const data = new FormData();
+		data.append(COOKIE_KEY, cookieValue);
+		if (isExternal()) { data.append(EXTERNAL_KEY, "1"); }
+		data.append('attend_hash', attendHash);
+		data.append('action', action);
+		data.append('__t', (new Date()).getTime().toString());
+		
+		if (navigator && navigator.sendBeacon) {
+			navigator.sendBeacon(url, data);
+			return;
+		} else {
+			const request = new XMLHttpRequest();
+			request.open('POST', url);
+			request.responseType = 'json';
+			request.send(data);
+		}
+	}	
+	
+	function showAttendPreviewToast(cookieValue) {
+		
+		const TOAST_ID = '__smz_ma_preview';
+		
+		// CSS
+		const styles = [
+			'position: fixed;',
+			'top: 10px;',
+			'right: 10px;',
+			'line-height: 40px;',
+			'padding: 5px 15px;',
+			'background-color: #1E96C8;',
+			'color: #fff;',
+			'opacity: 0.5;',
+			'z-index: 100000;'
+		];
+		const styleText = '#' + TOAST_ID + ' {' + styles.join('') + '}';
+		const styleElement = document.createElement('style');
+		styleElement.appendChild(document.createTextNode(styleText));
+		styleElement.appendChild(document.createTextNode('#' + TOAST_ID + ':hover { opacity : 1; }'));
+		document.head.appendChild(styleElement);		
+		
+		const toast = document.createElement('div');
+		toast.id = TOAST_ID
+		toast.textContent = '接客プレビュー中';
+		document.body.appendChild(toast);
+		
+		toast.appendChild(getLogoutButton());
+		
+		function getLogoutButton() {
+			
+			const TOAST_LOGOUT_ID = '__smz_ma_preview_logout';
+			
+			// CSS
+			const styles = [
+				'height: 30px;',
+				'line-height: 30px;',
+				'background-color: #777;',
+				'color: white;',
+				'text-align: center;',
+				'cursor: pointer;',
+				'padding: 3px 10px;',
+				'margin-left: 10px;',
+				'border-radius: 5px;'
+			];
+			const styleText = '#' + TOAST_LOGOUT_ID + ' {' + styles.join('') + '}';
+			const styleElement = document.createElement('style');
+			styleElement.appendChild(
+				document.createTextNode(styleText)
+			);
+			document.head.appendChild(styleElement);
+			
+			// ボタン
+			const button = document.createElement('span');
+			button.id = TOAST_LOGOUT_ID;
+			button.textContent = '終了';
+			button.addEventListener('click', function(e) {
+				e.preventDefault();
+				e.stopPropagation();
+				
+				let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'attend_preview_end';
+				link += '?' + COOKIE_KEY + '=' + cookieValue;
+				if (isExternal()) link += "&" + EXTERNAL_KEY + "=1";
+				link += '&__t=' + (new Date()).getTime().toString();
+				
+				const request = new XMLHttpRequest();
+				request.addEventListener('load', function(e) {
+					const newUrl = document.location.protocol + '//'
+								+ document.location.hostname 
+								+ document.location.pathname 
+								+ document.location.search;
+					const newWindow = window.open(newUrl, window.name + '_logout' + (new Date()).getTime().toString());
+					window.close();
+					newWindow.focus();
+				});
+				request.addEventListener('error', function(e) {});
+				request.open('GET', link);
+				request.responseType = 'json';
+				request.send();
+				return;
+			});
+			return button;
+		}
+	}
+	
+	// リンクにクッキーパラメータ付与
+	function attachCookieParameter(cookieValue) {
+		const topDirs = __smz_ma.top_url.split('/');
+		const anchors = document.querySelectorAll('a');
+		for (let i = 0; i < anchors.length; i++) {
+			const anchor = anchors[i];
+			const href = anchor.href;
+			if (href.indexOf('/') === -1) continue;
+			const parts = href.split('/');
+			if (__smz_ma.hostname != parts[2]) continue;
+			
+			let anchorIndex = 3;
+			let isMatch = true;
+			for (let topDirIndex = 1; topDirIndex < topDirs.length; topDirIndex++) {
+				if (!topDirs[topDirIndex] || topDirs[topDirIndex] == parts[anchorIndex]) {
+					anchorIndex++;
+					continue;
+				}
+				isMatch = false;
+				break;
+			}
+			if (!isMatch) continue;
+			
+			anchor.href = anchor.href 
+						+ (anchor.href.indexOf('?') === -1 ? '?' : '&')
+						+ COOKIE_KEY + '=' + cookieValue;
+		}
+	}
+	
+	function transfer(cookieValue) {
+		if (document.location.search.indexOf('?' + TRANSFER_PARAMETER + '=') === -1 && 
+			document.location.search.indexOf('&' + TRANSFER_PARAMETER + '=') === -1 ) return false;
+		const regex = new RegExp('(\\?|&)' + TRANSFER_PARAMETER + '=([^\\?&=]*)(&|$)');
+		const match = document.location.search.match(regex);
+		if (!match || match.length < 3) {
+			hideOverlay();
+			return true;
+		}
+		let transferUrl = decodeURIComponent(match[2]);
+		const urlRegex = new RegExp('https?://' + __smz_ma.hostname + __smz_ma.top_url + '.*');
+		if (!transferUrl.match(urlRegex)) {
+			hideOverlay();
+			return false;
+		}
+		document.location.href = transferUrl
+								+ (transferUrl.indexOf('?') === -1 ? '?' : '&')
+								+ COOKIE_KEY + '=' + cookieValue;
+		return true;
+	}
+
+	function showOverlay() {
+		
+		// URLチェックのみで即表示
+		if (document.location.search.indexOf('?' + TRANSFER_PARAMETER + '=') === -1 && 
+			document.location.search.indexOf('&' + TRANSFER_PARAMETER + '=') === -1 ) return;
+
+		// 網掛け
+		const overlay = document.createElement('div');
+		overlay.id = OVERLAY_ID;
+		overlay.style.position = 'fixed';
+		overlay.style.top = 0;
+		overlay.style.left = 0;
+		overlay.style.zIndex = 1000;
+		overlay.style.width = '100%';
+		overlay.style.height = '100%';
+		overlay.style.backgroundColor = '#fff'; // 異常値対策
+		overlay.style.backgroundColor = OVERLAY_BACKGROUND_COLOR;
+		overlay.style.opacity = 0.3;
+		overlay.style.visibility = 'visible';
+		overlay.style.transition = '.3s linear';
+
+		// 読み込みイメージ
+		const indicator = document.createElement('div');
+		indicator.style.border = '16px solid #f3f3f3'; /* Light grey */
+		indicator.style.borderTop = '16px solid #3498db'; /* Blue */
+		indicator.style.borderRadius = '50%';
+		indicator.style.width = '120px';
+		indicator.style.height = '120px';
+		indicator.style.animation = 'request-indicator 2s linear infinite';
+		indicator.style.position = 'absolute';
+		indicator.style.top = 'calc( 50% - 60px )';
+		indicator.style.left = 'calc( 50% - 60px )';
+		overlay.appendChild(indicator);
+
+		// 読み込みアニメーション
+		const keyframes = '@keyframes request-indicator {' + [
+			'0% { transform: rotate(0deg); } ',
+			'100% { transform: rotate(360deg); }'
+		].join('') + '}';
+		const keyframeStyle = document.createElement('style');
+		keyframeStyle.appendChild(
+			document.createTextNode(keyframes)
+		);
+
+		const heads = document.getElementsByTagName('head');
+		if (heads && heads.length > 0) {
+			heads[0].appendChild(keyframeStyle);
+			document.body.appendChild(overlay);
+		}
+	}
+	
+	function hideOverlay() {
+		const overlay = document.getElementById(OVERLAY_ID);
+		if (!overlay) return;
+		overlay.parentNode.removeChild(overlay);
+	}
+	
+	function findAncestorByClassName(element, className) {
+		let e = element;
+		while(!e.classList.contains(className)) {
+			e = e.parentElement;
+			if (e.tagName.toLowerCase() == 'body') {
+				e = null;
+				break;
+			}
+		}
+		return e;
+	}
+
+
+	//-------------------------------------------
+	// ページ遷移処理
+	//-------------------------------------------
+	function initializePageTransition() {
+		
+		// 滞在開始時間
+		let pageViewStartTime = new Date();
+
+		// スクロール
+		let scrollHeightMax = 0;
+		let scrollPercentageMax = 0;
+		let pageHeight = getPageHeight();
+		let viewHeight = window.innerHeight;
+
+		// スクロールイベント処理
+		pageScroll();
+		document.addEventListener('scroll', function(ev) {
+			pageScroll(); 
+		});
+		function pageScroll() {
+			let scrollHeight = window.pageYOffset;
+			
+			if (scrollHeight > 0) { scrollHeight += viewHeight; }
+			let scrollPercentage = parseInt((scrollHeight / pageHeight) *100);
+			if (scrollPercentage > 100) { scrollPercentage = 100; }
+			
+			if (scrollHeight>scrollHeightMax) { scrollHeightMax = scrollHeight; }
+			if (scrollPercentage>scrollPercentageMax) { scrollPercentageMax = scrollPercentage; }
+		}
+
+
+		// ページ遷移前イベント処理
+		window.addEventListener('pagehide', sendPageTransition);
+		function sendPageTransition() {
+			let pageViewEndTime = new Date();
+			
+			let data = {};
+			data.__smz_ma = getCookieItem(COOKIE_KEY);
+			if (isExternal()) data._smz_external = "1";
+			data.dur      = pageViewEndTime.getTime() - pageViewStartTime.getTime();
+			data.scr      = scrollPercentageMax;
+			data.url      = document.location.href;
+			data.tm       = (new Date()).getTime();
+
+			let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'pt.json';
+			sendData(link, data);
+		}
+
+		function sendData(url, data) {
+			if ('sendBeacon' in navigator && !isSafari()) {
+				sendDataByBeacon(url, data);
+			}else{
+				sendDataByAjax(url, data);
+			}
+		}
+
+		function sendDataByBeacon(url, data) {
+
+			let dataForm = new FormData();
+			Object.keys(data).forEach(function(key) {
+				dataForm.append(key, data[key]);
+			})
+
+			navigator.sendBeacon(url, dataForm);
+		}
+
+		function sendDataByAjax(url, data) {
+			var xhr = new XMLHttpRequest();
+			xhr.open('POST', url, false);
+			//xhr.responseType = 'text';
+			xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');   
+			xhr.onload = function () {}
+			xhr.onerror = function (e) {}
+			xhr.send(
+				"__smz_ma=" + encodeURIComponent(data.__smz_ma) +
+				"&dur=" + encodeURIComponent(data.dur) +
+				"&scr=" + encodeURIComponent(data.scr) +
+				"&url=" + encodeURIComponent(data.url) +
+				"&tm=" + encodeURIComponent(data.tm)
+			);
+		}
+
+		function getPageHeight() {
+			var myScrollHeight = Math.max(
+				document.body.scrollHeight, document.documentElement.scrollHeight,
+				document.body.offsetHeight, document.documentElement.offsetHeight,
+				document.body.clientHeight, document.documentElement.clientHeight
+			);
+			return myScrollHeight;
+		}
+		
+	}
+
+	//-------------------------------------------
+	// 外部フォーム処理
+	//-------------------------------------------
+	function initializeExternalForm() {
+
+		let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'fmd.json?tm=' + (new Date()).getTime();
+		getFormDefineByAjax(link);
+
+		function getFormDefineByAjax(url) {
+			var xhr = new XMLHttpRequest();
+			xhr.open('POST', url);
+			xhr.responseType = 'text';
+			xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');   
+			xhr.onload = function () {
+				var json = JSON.parse(xhr.responseText);
+				if (json.url != null) {
+					initialize(json);
+				}
+			};
+			xhr.onerror = function (e) {};
+			xhr.send(
+				"url=" + encodeURIComponent(location.href)
+			);
+		}
+
+		function initialize(formCapture) {
+
+			// イベント(load/submit/unload)のタイミングでフォームデータを取得する
+			if (location.pathname==formCapture.url) {
+				if (formCapture.event=="load") {
+					// loadの場合は、DOMContentLoaded済なので即時
+					getFormData();
+				}else if (formCapture.event=="unload") {
+					// unloadの場合は、iOSを考慮しpagehide
+					window.addEventListener('pagehide', getFormData);
+				}else{
+					// submitの場合は、イベント発生時
+					window.addEventListener(formCapture.event, getFormData);
+				}
+			}
+			function getFormData() {
+
+				let formData = {};
+				const fieldList = formCapture.data;
+
+				fieldList.forEach(function(entity){
+					formData[entity.name] = getFormValue(entity);
+				});
+
+				formData["__smz_ma"] = getCookieItem(COOKIE_KEY);
+				if (isExternal()) formData["__smz_external"] = "1";
+				formData["__smz_form_key"] = formCapture.key;
+				formData["__smz_tm"] = (new Date()).getTime();
+
+				// メールが空の場合は処理を抜ける（URLが同一の確認画面対策）
+				if (formData["mail"]==null || formData["mail"]=="") {
+					return false;
+				}
+
+				// 送信
+				let link = '//' + __smz_ma.hostname + __smz_ma.top_url + 'fmv.json';
+				let data = { "form": JSON.stringify(formData) };
+				sendData(link, data);
+
+				return true;
+			}
+
+			function getFormValue(entity) {
+				let value = null;
+
+				if (entity.method=="name") {
+					let formElem = document.querySelector("[name='" + entity.param + "']");
+					if (formElem!=null) {
+						value = formElem.value;
+					}
+				}
+				else if (entity.method=="id") {
+					let formElem = document.querySelector("#" + entity.param );
+					if (formElem!=null) {
+						value = formElem.value;
+					}
+				}
+				else if (entity.method=="class") {
+					let formElem = document.querySelector("." + entity.param );
+					if (formElem!=null) {
+						value = formElem.value;
+					}
+				}
+				else if (entity.method=="selector") {
+					let formElem = document.querySelector(entity.param );
+					if (formElem!=null) {
+						value = formElem.value;
+					}
+				}
+
+				return value;
+			}
+			
+			function sendData(url, data) {
+				if ('sendBeacon' in navigator && !isSafari()) {
+					sendDataByBeacon(url, data);
+				}else{
+					sendDataByAjax(url, data);
+				}
+			}
+
+			function sendDataByBeacon(url, data) {
+
+				let dataForm = new FormData();
+				Object.keys(data).forEach(function(key) {
+					dataForm.append(key, data[key]);
+				})
+
+				navigator.sendBeacon(url, dataForm);
+			}
+
+			function sendDataByAjax(url, data) {
+				var xhr = new XMLHttpRequest();
+				xhr.open('POST', url, false);
+				//xhr.responseType = 'text';
+				xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');   
+				xhr.onload = function () {}
+				xhr.onerror = function (e) {}
+				xhr.send(
+					"form=" + encodeURIComponent(data.form)
+				);
+			}
+
+		}
+
+	}
+
+
+	 /*\
+	 |*|  based on
+	 |*|  :: cookies.js ::
+	 |*|
+	 |*|  A complete cookies reader/writer framework with full unicode support.
+	 |*|  https://developer.mozilla.org/en-US/docs/DOM/document.cookie
+	 \*/
+	function getCookieItem(sKey) {
+		if (!sKey || !hasCookieItem(sKey)) { return null; }
+		return unescape(document.cookie.replace(new RegExp("(?:^|.*;\\s*)" + escape(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=\\s*((?:[^;](?!;))*[^;]?).*"), "$1"));
+	}
+	function setCookieItem(sKey, sValue, vEnd, sPath, sDomain, bSecure) {
+		if (!sKey || /^(?:expires|max\-age|path|domain|secure)$/i.test(sKey)) { return; }
+		var sExpires = "";
+		if (vEnd) {
+			switch (vEnd.constructor) {
+				case Number:
+					sExpires = vEnd === Infinity ? "; expires=Tue, 19 Jan 2038 03:14:07 GMT" : "; max-age=" + vEnd;
+					break;
+				case String:
+					sExpires = "; expires=" + vEnd;
+					break;
+				case Date:
+					sExpires = "; expires=" + vEnd.toGMTString();
+					break;
+			}
+		}
+		document.cookie = escape(sKey) + "=" + escape(sValue) + sExpires + (sDomain ? "; domain=" + sDomain : "") + (sPath ? "; path=" + sPath : "") + (bSecure ? "; secure" : "");
+	}
+	function removeCookieItem(sKey, sPath) {
+		if (!sKey || !hasCookieItem(sKey)) { return; }
+		document.cookie = escape(sKey) + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT" + (sPath ? "; path=" + sPath : "");
+	}
+	function hasCookieItem(sKey) {
+		return (new RegExp("(?:^|;\\s*)" + escape(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=")).test(document.cookie);
+	}
+
+	 /*\
+	 |*|  Common Function
+	 \*/
+	function isSafari() {
+ 		var ua = navigator.userAgent.toLowerCase();
+		return ( ua.indexOf('safari')!=-1 && ua.indexOf('chrome')==-1 );
+	}
+
+
+})()
